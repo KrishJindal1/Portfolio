@@ -36,16 +36,73 @@ function isEditableElement(target: EventTarget | null): boolean {
   );
 }
 
-interface FlightPhysicsLoopProps {
-  flightRef: React.MutableRefObject<DroneFlightState>;
-  keysRef: React.MutableRefObject<Set<string>>;
-  onNearbyChange: (egg: SecretEggMeta | null) => void;
+interface InteractiveTarget {
+  element: HTMLElement;
+  label: string;
+  isDirectControl: boolean;
+}
+
+function getScannerPoint(nx: number, ny: number): { px: number; py: number } {
+  const px = THREE.MathUtils.clamp(((nx + 1) / 2) * window.innerWidth, 8, window.innerWidth - 8);
+  const py = THREE.MathUtils.clamp(
+    ((1 - ny) / 2) * window.innerHeight + 18,
+    8,
+    window.innerHeight - 8
+  );
+  return { px, py };
+}
+
+function getReadableLabel(el: HTMLElement): string {
+  const aria = el.getAttribute("aria-label");
+  if (aria && aria.trim().length > 0) return aria.trim();
+  const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+  if (text.length > 0) {
+    return text.length > 28 ? `${text.slice(0, 26)}…` : text;
+  }
+  return "Select";
+}
+
+function findInteractiveUnderDrone(nx: number, ny: number): InteractiveTarget | null {
+  if (typeof window === "undefined") return null;
+  const { px, py } = getScannerPoint(nx, ny);
+  const stack = document.elementsFromPoint(px, py);
+
+  for (const node of stack) {
+    if (!(node instanceof HTMLElement)) continue;
+    if (node.closest("[data-drone-hud]") || node.closest("[data-drone-reticle]")) {
+      continue;
+    }
+
+    const interactive = node.closest<HTMLElement>(
+      'a[href], button:not([disabled]), [role="button"]'
+    );
+    if (interactive && !interactive.closest("[data-drone-hud]")) {
+      return {
+        element: interactive,
+        label: getReadableLabel(interactive),
+        isDirectControl: true,
+      };
+    }
+
+    const card = node.closest<HTMLElement>("article");
+    if (card) {
+      const cardLink = card.querySelector<HTMLElement>('a[href^="/projects/"]');
+      if (cardLink) {
+        return {
+          element: cardLink,
+          label: getReadableLabel(cardLink),
+          isDirectControl: false,
+        };
+      }
+    }
+  }
+
+  return null;
 }
 
 function findSecretUnderDrone(nx: number, ny: number): SecretEggMeta | null {
   if (typeof window === "undefined") return null;
-  const px = ((nx + 1) / 2) * window.innerWidth;
-  const py = ((1 - ny) / 2) * window.innerHeight;
+  const { px, py } = getScannerPoint(nx, ny);
   const padding = 52;
 
   for (const egg of SECRET_EGGS) {
@@ -64,13 +121,28 @@ function findSecretUnderDrone(nx: number, ny: number): SecretEggMeta | null {
   return null;
 }
 
+interface FlightPhysicsLoopProps {
+  flightRef: React.MutableRefObject<DroneFlightState>;
+  keysRef: React.MutableRefObject<Set<string>>;
+  reticleElRef: React.RefObject<HTMLDivElement | null>;
+  highlightElRef: React.RefObject<HTMLDivElement | null>;
+  targetedElRef: React.MutableRefObject<HTMLElement | null>;
+  onNearbyChange: (egg: SecretEggMeta | null) => void;
+  onTargetChange: (target: InteractiveTarget | null) => void;
+}
+
 function FlightPhysicsLoop({
   flightRef,
   keysRef,
+  reticleElRef,
+  highlightElRef,
+  targetedElRef,
   onNearbyChange,
+  onTargetChange,
 }: FlightPhysicsLoopProps) {
   const lastCheckRef = useRef(0);
   const lastNearbyIdRef = useRef<SecretEggId | null>(null);
+  const lastTargetElRef = useRef<HTMLElement | null>(null);
   const scrollVelRef = useRef(0);
   const scrollRemainderRef = useRef(0);
 
@@ -96,10 +168,9 @@ function FlightPhysicsLoop({
     flight.vx = THREE.MathUtils.damp(flight.vx, 0, damping, dt);
     flight.vy = THREE.MathUtils.damp(flight.vy, 0, damping, dt);
 
-    flight.nx = THREE.MathUtils.clamp(flight.nx + flight.vx * dt, -0.88, 0.88);
-    flight.ny = THREE.MathUtils.clamp(flight.ny + flight.vy * dt, -0.82, 0.82);
+    flight.nx = THREE.MathUtils.clamp(flight.nx + flight.vx * dt, -0.92, 0.92);
+    flight.ny = THREE.MathUtils.clamp(flight.ny + flight.vy * dt, -0.88, 0.94);
 
-    // Gently steer yaw toward horizontal flight direction
     if (Math.abs(flight.vx) > 0.05) {
       flight.yaw = THREE.MathUtils.clamp(flight.vx * 0.45, -0.65, 0.65);
     } else {
@@ -107,14 +178,14 @@ function FlightPhysicsLoop({
     }
 
     // Smoothly damped page scroll when flying into top/bottom edges or corners
-    const edgeStart = 0.56;
-    const edgeMax = 0.82;
+    const edgeStart = 0.62;
+    const edgeMax = 0.92;
     let targetScrollVel = 0;
 
-    if (flight.ny < -edgeStart && (inputY < 0 || flight.ny <= -0.66)) {
+    if (flight.ny < -edgeStart && (inputY < 0 || flight.ny <= -0.74)) {
       const factor = THREE.MathUtils.smoothstep(-flight.ny, edgeStart, edgeMax);
       targetScrollVel = factor * 760 * boost;
-    } else if (flight.ny > edgeStart && (inputY > 0 || flight.ny >= 0.66)) {
+    } else if (flight.ny > edgeStart && (inputY > 0 || flight.ny >= 0.78)) {
       const factor = THREE.MathUtils.smoothstep(flight.ny, edgeStart, edgeMax);
       targetScrollVel = -factor * 760 * boost;
     }
@@ -149,15 +220,44 @@ function FlightPhysicsLoop({
       scrollRemainderRef.current = 0;
     }
 
-    // Throttled secret target radar check (~8Hz)
+    // Update scanner crosshair position smoothly at 60fps
+    if (reticleElRef.current) {
+      const { px, py } = getScannerPoint(flight.nx, flight.ny);
+      reticleElRef.current.style.transform = `translate3d(${px}px, ${py}px, 0) translate(-50%, -50%)`;
+    }
+
+    // Keep targeting brackets glued onto hovered portfolio element
+    if (highlightElRef.current) {
+      const el = targetedElRef.current;
+      if (el && el.isConnected) {
+        const rect = el.getBoundingClientRect();
+        highlightElRef.current.style.opacity = "1";
+        highlightElRef.current.style.transform = `translate3d(${rect.left - 4}px, ${rect.top - 4}px, 0)`;
+        highlightElRef.current.style.width = `${rect.width + 8}px`;
+        highlightElRef.current.style.height = `${rect.height + 8}px`;
+      } else {
+        highlightElRef.current.style.opacity = "0";
+      }
+    }
+
+    // Throttled secret & interactive DOM element check (~12Hz)
     const now = state.clock.elapsedTime;
-    if (now - lastCheckRef.current > 0.12) {
+    if (now - lastCheckRef.current > 0.08) {
       lastCheckRef.current = now;
+
       const nearby = findSecretUnderDrone(flight.nx, flight.ny);
       const nextId = nearby?.id ?? null;
       if (nextId !== lastNearbyIdRef.current) {
         lastNearbyIdRef.current = nextId;
         onNearbyChange(nearby);
+      }
+
+      const target = findInteractiveUnderDrone(flight.nx, flight.ny);
+      const nextEl = target?.element ?? null;
+      if (nextEl !== lastTargetElRef.current) {
+        lastTargetElRef.current = nextEl;
+        targetedElRef.current = nextEl;
+        onTargetChange(target);
       }
     }
   });
@@ -188,22 +288,50 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
     barrelRollProgress: 0,
   });
   const keysRef = useRef<Set<string>>(new Set());
+  const reticleElRef = useRef<HTMLDivElement>(null);
+  const highlightElRef = useRef<HTMLDivElement>(null);
+  const targetedElRef = useRef<HTMLElement | null>(null);
 
   const [nearbySecret, setNearbySecret] = useState<SecretEggMeta | null>(null);
+  const [targetedItem, setTargetedItem] = useState<InteractiveTarget | null>(null);
   const [missionsOpen, setMissionsOpen] = useState(false);
   const [keysOpen, setKeysOpen] = useState(false);
 
   const overdriveUnlocked = discoveredEggs.includes("about-neural-loop");
   const barrelRollUnlocked = discoveredEggs.includes("skills-barrel-roll");
 
-  const triggerScan = useCallback(() => {
-    const flight = flightRef.current;
-    flight.scanPulse = 1;
-    const hit = findSecretUnderDrone(flight.nx, flight.ny);
-    if (hit) {
-      unlockEgg(hit.id);
-    }
-  }, [unlockEgg]);
+  const triggerScanOrClick = useCallback(
+    (forceClick = false) => {
+      const flight = flightRef.current;
+      flight.scanPulse = 1;
+
+      const secretHit = findSecretUnderDrone(flight.nx, flight.ny);
+      const hasUndiscoveredSecret =
+        secretHit !== null && !discoveredEggs.includes(secretHit.id);
+      const interactiveHit = findInteractiveUnderDrone(flight.nx, flight.ny);
+
+      // Always unlock any undiscovered secret when scanning over its sector
+      if (hasUndiscoveredSecret && secretHit) {
+        unlockEgg(secretHit.id);
+        // If aiming directly at a link/button (e.g., Navbar, View Project, Resume), still click it;
+        // if aiming at a card body/doodle, stop after revealing the secret unless Enter was pressed.
+        if (!forceClick && !interactiveHit?.isDirectControl) {
+          return;
+        }
+      }
+
+      if (interactiveHit?.element) {
+        interactiveHit.element.focus({ preventScroll: true });
+        interactiveHit.element.click();
+        return;
+      }
+
+      if (secretHit) {
+        unlockEgg(secretHit.id);
+      }
+    },
+    [discoveredEggs, unlockEgg]
+  );
 
   const triggerBarrelRoll = useCallback(() => {
     if (!barrelRollUnlocked) return;
@@ -246,7 +374,16 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
       if (event.repeat) return;
 
       if (key === " " || key === "f") {
-        triggerScan();
+        triggerScanOrClick(false);
+      } else if (key === "enter") {
+        if (
+          event.target instanceof HTMLElement &&
+          event.target.closest("[data-drone-hud]")
+        ) {
+          return;
+        }
+        event.preventDefault();
+        triggerScanOrClick(true);
       } else if (key === "b") {
         triggerBarrelRoll();
       } else if (key === "r") {
@@ -276,7 +413,7 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
       window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("blur", handleBlur);
     };
-  }, [setMode, triggerBarrelRoll, triggerScan]);
+  }, [setMode, triggerBarrelRoll, triggerScanOrClick]);
 
   const setVirtualKey = (key: string, active: boolean) => {
     if (active) {
@@ -286,8 +423,46 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
     }
   };
 
+  const hasTarget = Boolean(targetedItem || nearbySecret);
+
   return (
     <>
+      {/* Interactive Element Targeting Corner Brackets */}
+      <div
+        ref={highlightElRef}
+        data-drone-reticle="true"
+        aria-hidden="true"
+        style={{ opacity: 0 }}
+        className="pointer-events-none fixed top-0 left-0 z-30 transition-opacity duration-150"
+      >
+        <span className="absolute top-0 left-0 h-3 w-3 border-t-2 border-l-2 border-[#84CC16]" />
+        <span className="absolute top-0 right-0 h-3 w-3 border-t-2 border-r-2 border-[#84CC16]" />
+        <span className="absolute bottom-0 left-0 h-3 w-3 border-b-2 border-l-2 border-[#84CC16]" />
+        <span className="absolute right-0 bottom-0 h-3 w-3 border-r-2 border-b-2 border-[#84CC16]" />
+      </div>
+
+      {/* Live Scanner Reticle Beneath Drone */}
+      <div
+        ref={reticleElRef}
+        data-drone-reticle="true"
+        aria-hidden="true"
+        className="pointer-events-none fixed top-0 left-0 z-30"
+      >
+        <div
+          className={`flex h-6 w-6 items-center justify-center rounded-full border transition-colors ${
+            hasTarget
+              ? "border-[#84CC16] bg-[#A3E635]/20"
+              : "border-[#111111]/45 bg-transparent"
+          }`}
+        >
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${
+              hasTarget ? "bg-[#84CC16]" : "bg-[#111111]/60"
+            }`}
+          />
+        </div>
+      </div>
+
       {/* Full-Website Transparent Drone Canvas Overlay */}
       <div
         aria-hidden="true"
@@ -339,7 +514,11 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
             <FlightPhysicsLoop
               flightRef={flightRef}
               keysRef={keysRef}
+              reticleElRef={reticleElRef}
+              highlightElRef={highlightElRef}
+              targetedElRef={targetedElRef}
               onNearbyChange={setNearbySecret}
+              onTargetChange={setTargetedItem}
             />
           </Suspense>
         </Canvas>
@@ -348,6 +527,7 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
       {/* Easter Egg Discovery Toast */}
       {latestUnlocked ? (
         <div
+          data-drone-hud="true"
           role="status"
           aria-live="polite"
           className="fixed top-20 right-5 z-40 w-80 border border-[#111111] bg-[#111111] p-4 text-[#F5F5F3]"
@@ -378,13 +558,22 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
       ) : null}
 
       {/* Floating Drone Flight HUD */}
-      <div className="fixed right-5 bottom-5 z-40 flex flex-col items-end gap-2.5">
-        {/* Target Lock Prompt */}
-        {nearbySecret ? (
+      <div
+        data-drone-hud="true"
+        className="fixed right-5 bottom-5 z-40 flex flex-col items-end gap-2.5"
+      >
+        {/* Target Lock / Scanner Click Prompt */}
+        {targetedItem || nearbySecret ? (
           <div className="flex items-center gap-2 border border-[#111111] bg-[#FFFFFF] px-3 py-1.5 font-mono text-[11px] text-[#111111]">
             <span className="h-2 w-2 rounded-full bg-[#84CC16]" aria-hidden="true" />
             <span>
-              LOCKED: {nearbySecret.code} — PRESS SPACE / SCAN
+              {targetedItem?.isDirectControl
+                ? `CLICK "${targetedItem.label}" · SPACE / ENTER`
+                : nearbySecret && !discoveredEggs.includes(nearbySecret.id)
+                  ? `LOCKED: ${nearbySecret.code} — PRESS SPACE`
+                  : targetedItem
+                    ? `OPEN "${targetedItem.label}" · SPACE / ENTER`
+                    : `LOCKED: ${nearbySecret?.code}`}
             </span>
           </div>
         ) : null}
@@ -463,7 +652,11 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
               </div>
               <div className="flex justify-between">
                 <dt className="text-[var(--color-text-primary)]">Space / F</dt>
-                <dd className="text-[#666666]">Scan Secret Target</dd>
+                <dd className="text-[#666666]">Scan / Click Target</dd>
+              </div>
+              <div className="flex justify-between">
+                <dt className="text-[var(--color-text-primary)]">Enter</dt>
+                <dd className="text-[#666666]">Click Highlighted Link</dd>
               </div>
               <div className="flex justify-between">
                 <dt className="text-[var(--color-text-primary)]">B</dt>
@@ -527,11 +720,11 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
         <div className="flex flex-wrap items-center gap-1.5 border border-[var(--color-border)] bg-[var(--color-surface)]/95 p-1.5">
           <button
             type="button"
-            onClick={triggerScan}
+            onClick={() => triggerScanOrClick(false)}
             className="inline-flex items-center gap-1.5 border border-[#111111] bg-[#111111] px-2.5 py-1 font-mono text-[10px] uppercase tracking-[0.14em] text-[#FFFFFF] transition-colors hover:bg-[#2A2A2A]"
           >
             <Radar className="h-3 w-3 text-[#A3E635]" aria-hidden="true" />
-            Scan
+            {targetedItem ? "Click / Scan" : "Scan"}
           </button>
 
           {barrelRollUnlocked ? (
@@ -576,4 +769,3 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
     </>
   );
 }
-
