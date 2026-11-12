@@ -15,7 +15,7 @@ export interface JointAngles {
   grip: number;
 }
 
-export type PosePresetId = "home" | "inspect" | "reach";
+export type PosePresetId = "home";
 
 export interface PosePreset {
   id: PosePresetId;
@@ -35,32 +35,6 @@ export const POSE_PRESETS: PosePreset[] = [
       j5: -0.42,
       j6: 0.0,
       grip: 0.55,
-    },
-  },
-  {
-    id: "inspect",
-    label: "INSPECT",
-    angles: {
-      j1: -0.28,
-      j2: 0.12,
-      j3: -0.84,
-      j4: -0.25,
-      j5: -0.78,
-      j6: 0.35,
-      grip: 0.25,
-    },
-  },
-  {
-    id: "reach",
-    label: "REACH",
-    angles: {
-      j1: -0.72,
-      j2: -0.22,
-      j3: -0.58,
-      j4: 0.0,
-      j5: -0.62,
-      j6: 0.0,
-      grip: 0.85,
     },
   },
 ];
