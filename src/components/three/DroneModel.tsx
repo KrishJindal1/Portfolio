@@ -17,8 +17,14 @@ export interface DroneFlightState {
   barrelRollProgress: number;
 }
 
+export interface BeamScreenPoint {
+  px: number;
+  py: number;
+}
+
 interface DroneModelProps {
   flightRef: MutableRefObject<DroneFlightState>;
+  beamScreenRef: MutableRefObject<BeamScreenPoint>;
   overdrive: boolean;
   reducedMotion: boolean;
 }
@@ -30,18 +36,29 @@ const ARM_MOUNTS: Array<{ x: number; z: number; spinDir: number; rotY: number }>
   { x: -0.46, z: -0.46, spinDir: 1, rotY: Math.PI / 4 },
 ];
 
-export function DroneModel({ flightRef, overdrive, reducedMotion }: DroneModelProps) {
+export function DroneModel({
+  flightRef,
+  beamScreenRef,
+  overdrive,
+  reducedMotion,
+}: DroneModelProps) {
   const materials = useMemo(() => createArmMaterials(), []);
   const size = useThree((state) => state.size);
+  const camera = useThree((state) => state.camera);
 
   const rootRef = useRef<THREE.Group>(null);
   const bodyTiltRef = useRef<THREE.Group>(null);
+  const beamTipRef = useRef<THREE.Group>(null);
+  const beamWorldVec = useMemo(() => new THREE.Vector3(), []);
   const bankRollRef = useRef(0);
   const rollDirRef = useRef(-1);
   const wasRollingRef = useRef(false);
   const rotorRefs = useRef<Array<THREE.Group | null>>([null, null, null, null]);
   const scanConeRef = useRef<THREE.Mesh>(null);
   const scanMatRef = useRef<THREE.MeshBasicMaterial>(null);
+  const beamMarkerRef = useRef<THREE.Group>(null);
+  const beamRingMatRef = useRef<THREE.MeshBasicMaterial>(null);
+  const beamDotMatRef = useRef<THREE.MeshBasicMaterial>(null);
 
   useEffect(() => {
     return () => {
@@ -134,17 +151,45 @@ export function DroneModel({ flightRef, overdrive, reducedMotion }: DroneModelPr
       rotor.rotation.y += dir * rotorSpinRate * dt;
     });
 
-    // Scanner beam pulse
+    // Project exact 3D center point of the scanner beam into viewport pixels
+    if (rootRef.current && beamTipRef.current) {
+      rootRef.current.updateMatrixWorld(true);
+      beamTipRef.current.getWorldPosition(beamWorldVec);
+      beamWorldVec.project(camera);
+      beamScreenRef.current.px = THREE.MathUtils.clamp(
+        ((beamWorldVec.x + 1) / 2) * size.width,
+        2,
+        Math.max(2, size.width - 2)
+      );
+      beamScreenRef.current.py = THREE.MathUtils.clamp(
+        ((1 - beamWorldVec.y) / 2) * size.height,
+        2,
+        Math.max(2, size.height - 2)
+      );
+    }
+
+    // Scanner beam cone & center marker (visible only during active scan pulse)
     if (flight.scanPulse > 0) {
       flight.scanPulse = Math.max(0, flight.scanPulse - dt * 1.8);
     }
+    const beamActive = flight.scanPulse > 0.01;
     if (scanConeRef.current && scanMatRef.current) {
-      const active = flight.scanPulse > 0.01;
-      scanConeRef.current.visible = active;
-      if (active) {
-        const s = 0.8 + (1 - flight.scanPulse) * 0.6;
+      scanConeRef.current.visible = beamActive;
+      if (beamActive) {
+        const s = 0.85 + (1 - flight.scanPulse) * 0.45;
         scanConeRef.current.scale.set(s, 1, s);
-        scanMatRef.current.opacity = flight.scanPulse * 0.28;
+        scanMatRef.current.opacity = flight.scanPulse * 0.3;
+      }
+    }
+    if (beamMarkerRef.current) {
+      beamMarkerRef.current.visible = beamActive;
+      if (beamActive) {
+        if (beamRingMatRef.current) {
+          beamRingMatRef.current.opacity = flight.scanPulse * 0.8;
+        }
+        if (beamDotMatRef.current) {
+          beamDotMatRef.current.opacity = flight.scanPulse * 0.95;
+        }
       }
     }
   });
@@ -261,18 +306,45 @@ export function DroneModel({ flightRef, overdrive, reducedMotion }: DroneModelPr
           </group>
         ))}
 
-        {/* Downward Scanner Pulse Cone */}
-        <mesh ref={scanConeRef} position={[0, -0.58, 0]} visible={false}>
-          <cylinderGeometry args={[0.06, 0.55, 0.95, 24, 1, true]} />
+        {/* Downward Scanner Beam & Center Point Marker (shown only while scanning) */}
+        <mesh ref={scanConeRef} position={[0, -0.54, 0]} visible={false}>
+          <cylinderGeometry args={[0.05, 0.42, 0.88, 24, 1, true]} />
           <meshBasicMaterial
             ref={scanMatRef}
             color="#A3E635"
             transparent
-            opacity={0.22}
+            opacity={0.3}
             side={THREE.DoubleSide}
             depthWrite={false}
           />
         </mesh>
+
+        <group ref={beamTipRef} position={[0, -0.98, 0]}>
+          <group ref={beamMarkerRef} visible={false}>
+            <mesh rotation={[-Math.PI / 2, 0, 0]}>
+              <ringGeometry args={[0.065, 0.095, 24]} />
+              <meshBasicMaterial
+                ref={beamRingMatRef}
+                color="#84CC16"
+                transparent
+                opacity={0.8}
+                side={THREE.DoubleSide}
+                depthWrite={false}
+              />
+            </mesh>
+            <mesh rotation={[-Math.PI / 2, 0, 0]}>
+              <circleGeometry args={[0.024, 16]} />
+              <meshBasicMaterial
+                ref={beamDotMatRef}
+                color="#84CC16"
+                transparent
+                opacity={0.95}
+                side={THREE.DoubleSide}
+                depthWrite={false}
+              />
+            </mesh>
+          </group>
+        </group>
       </group>
     </group>
   );

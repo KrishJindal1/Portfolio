@@ -17,7 +17,11 @@ import {
   X,
 } from "lucide-react";
 import * as THREE from "three";
-import { DroneModel, type DroneFlightState } from "./DroneModel";
+import {
+  DroneModel,
+  type BeamScreenPoint,
+  type DroneFlightState,
+} from "./DroneModel";
 import {
   SECRET_EGGS,
   useSimulationMode,
@@ -42,16 +46,6 @@ interface InteractiveTarget {
   isDirectControl: boolean;
 }
 
-function getScannerPoint(nx: number, ny: number): { px: number; py: number } {
-  const px = THREE.MathUtils.clamp(((nx + 1) / 2) * window.innerWidth, 8, window.innerWidth - 8);
-  const py = THREE.MathUtils.clamp(
-    ((1 - ny) / 2) * window.innerHeight + 18,
-    8,
-    window.innerHeight - 8
-  );
-  return { px, py };
-}
-
 function getReadableLabel(el: HTMLElement): string {
   const aria = el.getAttribute("aria-label");
   if (aria && aria.trim().length > 0) return aria.trim();
@@ -62,9 +56,8 @@ function getReadableLabel(el: HTMLElement): string {
   return "Select";
 }
 
-function findInteractiveUnderDrone(nx: number, ny: number): InteractiveTarget | null {
+function findInteractiveAtPoint(px: number, py: number): InteractiveTarget | null {
   if (typeof window === "undefined") return null;
-  const { px, py } = getScannerPoint(nx, ny);
   const stack = document.elementsFromPoint(px, py);
 
   for (const node of stack) {
@@ -100,10 +93,9 @@ function findInteractiveUnderDrone(nx: number, ny: number): InteractiveTarget | 
   return null;
 }
 
-function findSecretUnderDrone(nx: number, ny: number): SecretEggMeta | null {
+function findSecretAtPoint(px: number, py: number): SecretEggMeta | null {
   if (typeof window === "undefined") return null;
-  const { px, py } = getScannerPoint(nx, ny);
-  const padding = 52;
+  const padding = 48;
 
   for (const egg of SECRET_EGGS) {
     const el = document.querySelector(egg.sectionSelector);
@@ -123,8 +115,8 @@ function findSecretUnderDrone(nx: number, ny: number): SecretEggMeta | null {
 
 interface FlightPhysicsLoopProps {
   flightRef: React.MutableRefObject<DroneFlightState>;
+  beamScreenRef: React.MutableRefObject<BeamScreenPoint>;
   keysRef: React.MutableRefObject<Set<string>>;
-  reticleElRef: React.RefObject<HTMLDivElement | null>;
   highlightElRef: React.RefObject<HTMLDivElement | null>;
   targetedElRef: React.MutableRefObject<HTMLElement | null>;
   onNearbyChange: (egg: SecretEggMeta | null) => void;
@@ -133,8 +125,8 @@ interface FlightPhysicsLoopProps {
 
 function FlightPhysicsLoop({
   flightRef,
+  beamScreenRef,
   keysRef,
-  reticleElRef,
   highlightElRef,
   targetedElRef,
   onNearbyChange,
@@ -169,7 +161,7 @@ function FlightPhysicsLoop({
     flight.vy = THREE.MathUtils.damp(flight.vy, 0, damping, dt);
 
     flight.nx = THREE.MathUtils.clamp(flight.nx + flight.vx * dt, -0.92, 0.92);
-    flight.ny = THREE.MathUtils.clamp(flight.ny + flight.vy * dt, -0.88, 0.94);
+    flight.ny = THREE.MathUtils.clamp(flight.ny + flight.vy * dt, -0.78, 1.06);
 
     if (Math.abs(flight.vx) > 0.05) {
       flight.yaw = THREE.MathUtils.clamp(flight.vx * 0.45, -0.65, 0.65);
@@ -178,15 +170,17 @@ function FlightPhysicsLoop({
     }
 
     // Smoothly damped page scroll when flying into top/bottom edges or corners
-    const edgeStart = 0.62;
-    const edgeMax = 0.92;
+    const bottomEdgeStart = 0.54;
+    const bottomEdgeMax = 0.78;
+    const topEdgeStart = 0.8;
+    const topEdgeMax = 1.06;
     let targetScrollVel = 0;
 
-    if (flight.ny < -edgeStart && (inputY < 0 || flight.ny <= -0.74)) {
-      const factor = THREE.MathUtils.smoothstep(-flight.ny, edgeStart, edgeMax);
+    if (flight.ny < -bottomEdgeStart && (inputY < 0 || flight.ny <= -0.64)) {
+      const factor = THREE.MathUtils.smoothstep(-flight.ny, bottomEdgeStart, bottomEdgeMax);
       targetScrollVel = factor * 760 * boost;
-    } else if (flight.ny > edgeStart && (inputY > 0 || flight.ny >= 0.78)) {
-      const factor = THREE.MathUtils.smoothstep(flight.ny, edgeStart, edgeMax);
+    } else if (flight.ny > topEdgeStart && (inputY > 0 || flight.ny >= 0.9)) {
+      const factor = THREE.MathUtils.smoothstep(flight.ny, topEdgeStart, topEdgeMax);
       targetScrollVel = -factor * 760 * boost;
     }
 
@@ -220,12 +214,6 @@ function FlightPhysicsLoop({
       scrollRemainderRef.current = 0;
     }
 
-    // Update scanner crosshair position smoothly at 60fps
-    if (reticleElRef.current) {
-      const { px, py } = getScannerPoint(flight.nx, flight.ny);
-      reticleElRef.current.style.transform = `translate3d(${px}px, ${py}px, 0) translate(-50%, -50%)`;
-    }
-
     // Keep targeting brackets glued onto hovered portfolio element
     if (highlightElRef.current) {
       const el = targetedElRef.current;
@@ -240,19 +228,20 @@ function FlightPhysicsLoop({
       }
     }
 
-    // Throttled secret & interactive DOM element check (~12Hz)
+    // Throttled secret & interactive DOM element check at the exact center of the 3D beam
     const now = state.clock.elapsedTime;
     if (now - lastCheckRef.current > 0.08) {
       lastCheckRef.current = now;
+      const { px, py } = beamScreenRef.current;
 
-      const nearby = findSecretUnderDrone(flight.nx, flight.ny);
+      const nearby = findSecretAtPoint(px, py);
       const nextId = nearby?.id ?? null;
       if (nextId !== lastNearbyIdRef.current) {
         lastNearbyIdRef.current = nextId;
         onNearbyChange(nearby);
       }
 
-      const target = findInteractiveUnderDrone(flight.nx, flight.ny);
+      const target = findInteractiveAtPoint(px, py);
       const nextEl = target?.element ?? null;
       if (nextEl !== lastTargetElRef.current) {
         lastTargetElRef.current = nextEl;
@@ -287,8 +276,8 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
     scanPulse: 0,
     barrelRollProgress: 0,
   });
+  const beamScreenRef = useRef<BeamScreenPoint>({ px: 0, py: 0 });
   const keysRef = useRef<Set<string>>(new Set());
-  const reticleElRef = useRef<HTMLDivElement>(null);
   const highlightElRef = useRef<HTMLDivElement>(null);
   const targetedElRef = useRef<HTMLElement | null>(null);
 
@@ -304,11 +293,12 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
     (forceClick = false) => {
       const flight = flightRef.current;
       flight.scanPulse = 1;
+      const { px, py } = beamScreenRef.current;
 
-      const secretHit = findSecretUnderDrone(flight.nx, flight.ny);
+      const secretHit = findSecretAtPoint(px, py);
       const hasUndiscoveredSecret =
         secretHit !== null && !discoveredEggs.includes(secretHit.id);
-      const interactiveHit = findInteractiveUnderDrone(flight.nx, flight.ny);
+      const interactiveHit = findInteractiveAtPoint(px, py);
 
       // Always unlock any undiscovered secret when scanning over its sector
       if (hasUndiscoveredSecret && secretHit) {
@@ -423,11 +413,9 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
     }
   };
 
-  const hasTarget = Boolean(targetedItem || nearbySecret);
-
   return (
     <>
-      {/* Interactive Element Targeting Corner Brackets */}
+      {/* Interactive Element Targeting Corner Brackets (No extra pointer near drone) */}
       <div
         ref={highlightElRef}
         data-drone-reticle="true"
@@ -439,28 +427,6 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
         <span className="absolute top-0 right-0 h-3 w-3 border-t-2 border-r-2 border-[#84CC16]" />
         <span className="absolute bottom-0 left-0 h-3 w-3 border-b-2 border-l-2 border-[#84CC16]" />
         <span className="absolute right-0 bottom-0 h-3 w-3 border-r-2 border-b-2 border-[#84CC16]" />
-      </div>
-
-      {/* Live Scanner Reticle Beneath Drone */}
-      <div
-        ref={reticleElRef}
-        data-drone-reticle="true"
-        aria-hidden="true"
-        className="pointer-events-none fixed top-0 left-0 z-30"
-      >
-        <div
-          className={`flex h-6 w-6 items-center justify-center rounded-full border transition-colors ${
-            hasTarget
-              ? "border-[#84CC16] bg-[#A3E635]/20"
-              : "border-[#111111]/45 bg-transparent"
-          }`}
-        >
-          <span
-            className={`h-1.5 w-1.5 rounded-full ${
-              hasTarget ? "bg-[#84CC16]" : "bg-[#111111]/60"
-            }`}
-          />
-        </div>
       </div>
 
       {/* Full-Website Transparent Drone Canvas Overlay */}
@@ -508,13 +474,14 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
 
             <DroneModel
               flightRef={flightRef}
+              beamScreenRef={beamScreenRef}
               overdrive={overdriveUnlocked}
               reducedMotion={reducedMotion}
             />
             <FlightPhysicsLoop
               flightRef={flightRef}
+              beamScreenRef={beamScreenRef}
               keysRef={keysRef}
-              reticleElRef={reticleElRef}
               highlightElRef={highlightElRef}
               targetedElRef={targetedElRef}
               onNearbyChange={setNearbySecret}
