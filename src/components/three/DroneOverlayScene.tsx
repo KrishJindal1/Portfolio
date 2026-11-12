@@ -71,6 +71,8 @@ function FlightPhysicsLoop({
 }: FlightPhysicsLoopProps) {
   const lastCheckRef = useRef(0);
   const lastNearbyIdRef = useRef<SecretEggId | null>(null);
+  const scrollVelRef = useRef(0);
+  const scrollRemainderRef = useRef(0);
 
   useFrame((state, delta) => {
     const dt = Math.min(delta, 0.05);
@@ -104,11 +106,47 @@ function FlightPhysicsLoop({
       flight.yaw = THREE.MathUtils.damp(flight.yaw, 0, 4, dt);
     }
 
-    // Smoothly auto-scroll webpage when flying against top/bottom viewport edges
-    if (inputY < 0 && flight.ny <= -0.74) {
-      window.scrollBy({ top: 560 * boost * dt, behavior: "auto" });
-    } else if (inputY > 0 && flight.ny >= 0.74) {
-      window.scrollBy({ top: -560 * boost * dt, behavior: "auto" });
+    // Smoothly damped page scroll when flying into top/bottom edges or corners
+    const edgeStart = 0.56;
+    const edgeMax = 0.82;
+    let targetScrollVel = 0;
+
+    if (flight.ny < -edgeStart && (inputY < 0 || flight.ny <= -0.66)) {
+      const factor = THREE.MathUtils.smoothstep(-flight.ny, edgeStart, edgeMax);
+      targetScrollVel = factor * 760 * boost;
+    } else if (flight.ny > edgeStart && (inputY > 0 || flight.ny >= 0.66)) {
+      const factor = THREE.MathUtils.smoothstep(flight.ny, edgeStart, edgeMax);
+      targetScrollVel = -factor * 760 * boost;
+    }
+
+    scrollVelRef.current = THREE.MathUtils.damp(
+      scrollVelRef.current,
+      targetScrollVel,
+      6.5,
+      dt
+    );
+
+    if (Math.abs(scrollVelRef.current) > 1) {
+      const maxScrollY = Math.max(
+        0,
+        document.documentElement.scrollHeight - window.innerHeight
+      );
+      const atTop = window.scrollY <= 0 && scrollVelRef.current < 0;
+      const atBottom = window.scrollY >= maxScrollY - 1 && scrollVelRef.current > 0;
+
+      if (atTop || atBottom) {
+        scrollVelRef.current = 0;
+        scrollRemainderRef.current = 0;
+      } else {
+        scrollRemainderRef.current += scrollVelRef.current * dt;
+        const step = Math.trunc(scrollRemainderRef.current);
+        if (step !== 0) {
+          scrollRemainderRef.current -= step;
+          window.scrollBy({ top: step, behavior: "instant" });
+        }
+      }
+    } else {
+      scrollRemainderRef.current = 0;
     }
 
     // Throttled secret target radar check (~8Hz)
@@ -538,3 +576,4 @@ export default function DroneOverlayScene({ reducedMotion }: DroneOverlayScenePr
     </>
   );
 }
+

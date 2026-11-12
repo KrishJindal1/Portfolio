@@ -248,3 +248,4 @@ export function DroneModel({ flightRef, overdrive, reducedMotion }: DroneModelPr
     </group>
   );
 }
+

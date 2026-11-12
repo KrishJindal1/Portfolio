@@ -39,3 +39,4 @@ export function SecretRewardBadge({ eggId }: { eggId: SecretEggId }) {
     </div>
   );
 }
+

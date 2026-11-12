@@ -57,3 +57,4 @@ export function DroneOverlayWrapper() {
 
   return <DroneOverlayScene reducedMotion={reducedMotion} />;
 }
+
