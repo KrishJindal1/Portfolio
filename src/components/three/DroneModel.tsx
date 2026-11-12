@@ -36,6 +36,9 @@ export function DroneModel({ flightRef, overdrive, reducedMotion }: DroneModelPr
 
   const rootRef = useRef<THREE.Group>(null);
   const bodyTiltRef = useRef<THREE.Group>(null);
+  const bankRollRef = useRef(0);
+  const rollDirRef = useRef(-1);
+  const wasRollingRef = useRef(false);
   const rotorRefs = useRef<Array<THREE.Group | null>>([null, null, null, null]);
   const scanConeRef = useRef<THREE.Mesh>(null);
   const scanMatRef = useRef<THREE.MeshBasicMaterial>(null);
@@ -62,8 +65,40 @@ export function DroneModel({ flightRef, overdrive, reducedMotion }: DroneModelPr
     const worldY = flight.ny * halfH;
     const hoverBob = reducedMotion ? 0 : Math.sin(t * 2.8) * 0.04;
 
+    // Smoothly eased barrel roll progress + subtle aerial helical arc
+    let rollAngle = 0;
+    let rollArcX = 0;
+    let rollArcY = 0;
+    let rollPitchBoost = 0;
+    let rollRotorBoost = 0;
+
+    if (flight.barrelRollProgress > 0) {
+      if (!wasRollingRef.current) {
+        wasRollingRef.current = true;
+        rollDirRef.current = flight.vx < -0.08 ? 1 : -1;
+      }
+
+      flight.barrelRollProgress = Math.min(1, flight.barrelRollProgress + dt * 1.45);
+      const p = flight.barrelRollProgress;
+      // Smooth ease-in-out curve (zero snap at start or completion)
+      const eased = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+
+      rollAngle = eased * Math.PI * 2 * rollDirRef.current;
+      rollArcY = Math.sin(Math.PI * p) * 0.24;
+      rollArcX = Math.sin(Math.PI * 2 * p) * 0.14 * -rollDirRef.current;
+      rollPitchBoost = Math.sin(Math.PI * p) * 0.14;
+      rollRotorBoost = Math.sin(Math.PI * p) * 24;
+
+      if (p >= 1) {
+        flight.barrelRollProgress = 0;
+        wasRollingRef.current = false;
+      }
+    } else {
+      wasRollingRef.current = false;
+    }
+
     if (rootRef.current) {
-      rootRef.current.position.set(worldX, worldY + hoverBob, 0);
+      rootRef.current.position.set(worldX + rollArcX, worldY + hoverBob + rollArcY, 0);
       rootRef.current.rotation.y = THREE.MathUtils.damp(
         rootRef.current.rotation.y,
         flight.yaw,
@@ -72,22 +107,15 @@ export function DroneModel({ flightRef, overdrive, reducedMotion }: DroneModelPr
       );
     }
 
-    // Dynamic pitch & roll banking into velocity + optional barrel roll stunt
+    // Dynamic pitch & roll banking separated cleanly from barrel-roll offset
     if (bodyTiltRef.current) {
       const targetRoll = -THREE.MathUtils.clamp(flight.vx * 0.38, -0.45, 0.45);
-      const targetPitch = THREE.MathUtils.clamp(flight.vy * 0.25, -0.3, 0.3) + 0.34;
+      const targetPitch =
+        THREE.MathUtils.clamp(flight.vy * 0.25, -0.3, 0.3) + 0.34 + rollPitchBoost;
 
-      let rollOffset = 0;
-      if (flight.barrelRollProgress > 0) {
-        flight.barrelRollProgress = Math.min(1, flight.barrelRollProgress + dt * 1.85);
-        rollOffset = flight.barrelRollProgress * Math.PI * 2;
-        if (flight.barrelRollProgress >= 1) {
-          flight.barrelRollProgress = 0;
-        }
-      }
+      bankRollRef.current = THREE.MathUtils.damp(bankRollRef.current, targetRoll, 9, dt);
 
-      bodyTiltRef.current.rotation.z =
-        THREE.MathUtils.damp(bodyTiltRef.current.rotation.z, targetRoll, 9, dt) + rollOffset;
+      bodyTiltRef.current.rotation.z = bankRollRef.current + rollAngle;
       bodyTiltRef.current.rotation.x = THREE.MathUtils.damp(
         bodyTiltRef.current.rotation.x,
         targetPitch,
@@ -98,7 +126,8 @@ export function DroneModel({ flightRef, overdrive, reducedMotion }: DroneModelPr
 
     // Spin counter-rotating quadcopter rotors
     const speedMag = Math.hypot(flight.vx, flight.vy);
-    const rotorSpinRate = (reducedMotion ? 8 : 26) + speedMag * 12 + (overdrive ? 10 : 0);
+    const rotorSpinRate =
+      (reducedMotion ? 8 : 26) + speedMag * 12 + (overdrive ? 10 : 0) + rollRotorBoost;
     rotorRefs.current.forEach((rotor, idx) => {
       if (!rotor) return;
       const dir = ARM_MOUNTS[idx]?.spinDir ?? 1;
