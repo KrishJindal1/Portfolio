@@ -108,6 +108,7 @@ export default function RoboticArmScene({
   const pressedKeysRef = useRef<Set<string>>(new Set());
   const manualControlRef = useRef(false);
   const canvasElRef = useRef<HTMLCanvasElement | null>(null);
+  const isUnmountingRef = useRef(false);
   const dropCycleRef = useRef(0);
 
   const ballSimRef = useRef<BallSimulationState>({
@@ -297,17 +298,24 @@ export default function RoboticArmScene({
   const handleContextLostEvent = useCallback(
     (event: Event) => {
       event.preventDefault();
-      onContextLost();
+      // Defer so parent unmount cleanup (which sets isUnmountingRef) runs before reporting real context loss
+      window.setTimeout(() => {
+        if (!isUnmountingRef.current) {
+          onContextLost();
+        }
+      }, 0);
     },
     [onContextLost]
   );
 
   useEffect(() => {
-    const canvas = canvasElRef.current;
-    if (!canvas) return;
-    canvas.addEventListener("webglcontextlost", handleContextLostEvent);
+    isUnmountingRef.current = false;
     return () => {
-      canvas.removeEventListener("webglcontextlost", handleContextLostEvent);
+      isUnmountingRef.current = true;
+      const canvas = canvasElRef.current;
+      if (canvas) {
+        canvas.removeEventListener("webglcontextlost", handleContextLostEvent);
+      }
     };
   }, [handleContextLostEvent]);
 
@@ -376,6 +384,9 @@ export default function RoboticArmScene({
         }}
         onCreated={({ gl }) => {
           gl.setClearColor(0x000000, 0);
+          if (canvasElRef.current && canvasElRef.current !== gl.domElement) {
+            canvasElRef.current.removeEventListener("webglcontextlost", handleContextLostEvent);
+          }
           canvasElRef.current = gl.domElement;
           gl.domElement.addEventListener("webglcontextlost", handleContextLostEvent);
         }}

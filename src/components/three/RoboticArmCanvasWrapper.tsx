@@ -122,6 +122,14 @@ export function RoboticArmCanvasWrapper() {
   const { mode, setMode } = useSimulationMode();
   const [forceMobile3D, setForceMobile3D] = useState(false);
   const [contextLost, setContextLost] = useState(false);
+  const [prevMode, setPrevMode] = useState(mode);
+
+  if (mode !== prevMode) {
+    setPrevMode(mode);
+    if (mode === "arm" && contextLost) {
+      setContextLost(false);
+    }
+  }
 
   const mounted = useSyncExternalStore(
     emptySubscribe,
@@ -151,12 +159,23 @@ export function RoboticArmCanvasWrapper() {
     return <RoboticArmFallback reason="loading" />;
   }
 
-  if (!webglAvailable || contextLost) {
+  if (!webglAvailable) {
     return <RoboticArmFallback reason="webgl-unavailable" />;
   }
 
   if (mode === "drone") {
-    return <DroneLaunchpadStage onSwitchToArm={() => setMode("arm")} />;
+    return (
+      <DroneLaunchpadStage
+        onSwitchToArm={() => {
+          setContextLost(false);
+          setMode("arm");
+        }}
+      />
+    );
+  }
+
+  if (contextLost) {
+    return <RoboticArmFallback reason="webgl-unavailable" />;
   }
 
   if (isMobile && !forceMobile3D) {
